@@ -526,13 +526,71 @@ export function watchPlugin(name, onEnd) {
   };
 }
 
+const geminiUsageNestedReplacements = [
+  [
+    "cache_read_tokens:w(u?.cachedContentTokenCount),input_includes_cache_tokens:!0,cache_duration_seconds:Eg(u)",
+    "cache_read_tokens:w(u?.cachedContentTokenCount),reasoning_tokens:w(u?.thoughtsTokenCount),input_includes_cache_tokens:!0,cache_duration_seconds:Eg(u)"
+  ],
+  [
+    "total_cached_tokens:w(u.cachedContentTokenCount)}),l(o?.finishReason)",
+    "total_cached_tokens:w(u.cachedContentTokenCount),reasoning_tokens:w(u.thoughtsTokenCount)}),l(o?.finishReason)"
+  ],
+  [
+    "function Kd(e){let n={input_tokens:fa(e.usage)??e.usage.input_tokens,output_tokens:e.usage.output_tokens};",
+    "function Kd(e){let n={input_tokens:fa(e.usage)??e.usage.input_tokens,output_tokens:(e.usage.output_tokens??0)+(e.usage.reasoning_tokens??0),output_tokens_details:{thinking_tokens:e.usage.reasoning_tokens??0}};"
+  ],
+  [
+    "function bL(e){let n={output_tokens:e.output_tokens??0};",
+    "function bL(e){let n={output_tokens:(e.output_tokens??0)+(e.reasoning_tokens??0),output_tokens_details:{thinking_tokens:e.reasoning_tokens??0}};"
+  ]
+];
+
+const geminiUsageBundleReplacements = [
+  ...geminiUsageNestedReplacements,
+  [
+    "cache_read_tokens:T(u?.cachedContentTokenCount),input_includes_cache_tokens:!0",
+    "cache_read_tokens:T(u?.cachedContentTokenCount),reasoning_tokens:T(u?.thoughtsTokenCount),input_includes_cache_tokens:!0"
+  ],
+  [
+    "total_cached_tokens:T(u.cachedContentTokenCount)})",
+    "total_cached_tokens:T(u.cachedContentTokenCount),reasoning_tokens:T(u.thoughtsTokenCount)})"
+  ],
+  [
+    "??e.usage.input_tokens,output_tokens:e.usage.output_tokens};",
+    "??e.usage.input_tokens,output_tokens:(e.usage.output_tokens??0)+(e.usage.reasoning_tokens??0),output_tokens_details:{thinking_tokens:e.usage.reasoning_tokens??0}};"
+  ],
+  [
+    "{let t={output_tokens:e.output_tokens??0};",
+    "{let t={output_tokens:(e.output_tokens??0)+(e.reasoning_tokens??0),output_tokens_details:{thinking_tokens:e.reasoning_tokens??0}};"
+  ]
+];
+
+export function patchGeminiUsageInGatewayBundle(bundlePath) {
+  if (!existsSync(bundlePath)) {
+    return;
+  }
+  let source = readFileSync(bundlePath, "utf8");
+  let changed = false;
+  for (const [oldSnippet, newSnippet] of geminiUsageBundleReplacements) {
+    if (source.includes(oldSnippet)) {
+      source = source.replace(oldSnippet, newSnippet);
+      changed = true;
+    }
+  }
+  if (changed) {
+    writeFileSync(bundlePath, source, "utf8");
+  }
+}
+
 export async function buildMain(options = {}) {
+  patchGeminiUsageInGatewayBundle(path.join(gatewayPackageRoot, "dist", "index.js"));
   const [mainBuildResult] = await Promise.all([
     esbuild.build(createMainBuildOptions(options)),
     buildBotGatewaySdkRuntime(options),
     buildCoreServer(options),
     buildCli(options)
   ]);
+  patchGeminiUsageInGatewayBundle(electronGatewayRuntimeOutput);
   copyCliRuntimeToElectronDist();
   validateLightweightMcpBundles(mainBuildResult.metafile);
 }
@@ -554,11 +612,15 @@ export async function buildBotGatewaySdkRuntime(options = {}) {
 }
 
 export async function buildCli(options = {}) {
+  patchGeminiUsageInGatewayBundle(path.join(gatewayPackageRoot, "dist", "index.js"));
   await esbuild.build(createCliBuildOptions(options));
+  patchGeminiUsageInGatewayBundle(path.join(cliMainOutDir, "next-ai-gateway.js"));
 }
 
 export async function buildCoreServer(options = {}) {
+  patchGeminiUsageInGatewayBundle(path.join(gatewayPackageRoot, "dist", "index.js"));
   await esbuild.build(createCoreServerBuildOptions(options));
+  patchGeminiUsageInGatewayBundle(path.join(coreMainOutDir, "next-ai-gateway.js"));
 }
 
 export async function buildRenderer(options = {}) {

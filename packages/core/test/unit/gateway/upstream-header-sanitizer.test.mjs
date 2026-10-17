@@ -224,3 +224,102 @@ test("gateway sanitizer hook does not forward reverse proxy metadata to provider
     "x-custom-provider-header": "custom-value"
   });
 });
+
+test("gemini sanitizer splits mixed user turns with functionResponse and text into consecutive user turns", () => {
+  const [hook] = createGatewayPlugin().providerHooks;
+  const validSig = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
+  const result = hook.transformRequest({
+    targetProviderConfig: { type: "gemini_generate_content" },
+    upstreamRequest: {
+      body: {
+        contents: [
+          { role: "user", parts: [{ text: "Search web" }] },
+          {
+            role: "model",
+            parts: [
+              { text: "Thinking...", thought: true },
+              {
+                functionCall: { id: "call_1", name: "ToolSearch", args: { query: "select:WebSearch" } },
+                thoughtSignature: validSig
+              }
+            ]
+          },
+          {
+            role: "user",
+            parts: [
+              { functionResponse: { id: "call_1", name: "ToolSearch", response: { content: "loaded" } } },
+              { text: "Tool loaded." }
+            ]
+          }
+        ],
+        generationConfig: {
+          maxOutputTokens: 65536,
+          thinkingConfig: {
+            thinkingBudget: 0,
+            thinkingLevel: "HIGH",
+            includeThoughts: true
+          }
+        }
+      },
+      headers: { "content-type": "application/json" },
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent"
+    }
+  }).value;
+
+  assert.deepEqual(result.body.contents, [
+    { role: "user", parts: [{ text: "Search web" }] },
+    {
+      role: "model",
+      parts: [
+        { text: "Thinking...", thought: true },
+        {
+          functionCall: { id: "call_1", name: "ToolSearch", args: { query: "select:WebSearch" } },
+          thoughtSignature: validSig
+        }
+      ]
+    },
+    {
+      role: "user",
+      parts: [
+        { functionResponse: { id: "call_1", name: "ToolSearch", response: { content: "loaded" } } }
+      ]
+    },
+    {
+      role: "user",
+      parts: [{ text: "Tool loaded." }]
+    }
+  ]);
+  assert.deepEqual(result.body.generationConfig.thinkingConfig, {
+    thinkingLevel: "HIGH",
+    includeThoughts: true
+  });
+});
+
+test("gemini sanitizer appends user continuation turn when contents ends on model turn and strips invalid thoughtSignature", () => {
+  const [hook] = createGatewayPlugin().providerHooks;
+  const result = hook.transformRequest({
+    targetProviderConfig: { type: "gemini" },
+    upstreamRequest: {
+      body: {
+        contents: [
+          { role: "user", parts: [{ text: "Hello" }] },
+          {
+            role: "model",
+            parts: [
+              { text: "Prefill", thoughtSignature: "ccr_1792073279831" }
+            ]
+          }
+        ]
+      },
+      headers: { "content-type": "application/json" },
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent"
+    }
+  }).value;
+
+  assert.deepEqual(result.body.contents, [
+    { role: "user", parts: [{ text: "Hello" }] },
+    { role: "model", parts: [{ text: "Prefill" }] },
+    { role: "user", parts: [{ text: "Continue." }] }
+  ]);
+});
+
