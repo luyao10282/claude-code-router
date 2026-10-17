@@ -167,6 +167,7 @@ function toCoreGatewayProvider(
     billing: provider.billing,
     extraBody: provider.extraBody,
     extraHeaders: provider.extraHeaders,
+    modelMetadata: provider.modelMetadata,
     models: provider.models,
     name: credential
       ? providerCredentialInternalName(provider, type, credential)

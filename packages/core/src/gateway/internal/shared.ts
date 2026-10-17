@@ -15,6 +15,7 @@ export type CoreGatewayProvider = {
   billing?: unknown;
   extraBody?: unknown;
   extraHeaders?: unknown;
+  modelMetadata?: GatewayProviderConfig["modelMetadata"];
   models: string[];
   name: string;
   type: GatewayProviderCapabilityProtocol;

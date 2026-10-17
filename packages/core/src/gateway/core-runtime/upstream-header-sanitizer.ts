@@ -28,9 +28,13 @@ type ProviderPluginRequestInput = {
     id?: string;
     headers?: Record<string, string | string[] | undefined>;
   };
+  model?: string;
   targetProviderConfig?: {
     apikey?: string;
     baseurl?: string;
+    modelMetadata?: Record<string, {
+      supportedReasoningLevels?: Array<{ effort: string }>;
+    }>;
     type?: string;
   };
   upstreamRequest: UpstreamRequest;
@@ -332,7 +336,8 @@ export function createGatewayPlugin() {
           ok: true as const,
           value: applyGeminiRequestSanitizer(
             applyMetaTokenFloor(upstreamRequest),
-            input.targetProviderConfig
+            input.targetProviderConfig,
+            { model: input.model, sourceBody: input.request?.body }
           )
         };
       },
