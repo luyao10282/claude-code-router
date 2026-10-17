@@ -7,7 +7,15 @@ type UpstreamRequest = {
 };
 
 type TargetProviderConfig = {
+  modelMetadata?: Record<string, {
+    supportedReasoningLevels?: Array<{ effort: string }>;
+  }>;
   type?: string;
+};
+
+type GeminiRequestSanitizerOptions = {
+  model?: string;
+  sourceBody?: unknown;
 };
 
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -53,6 +61,83 @@ function isGeminiGenerateContentRequest(
   return /:(?:generateContent|streamGenerateContent)(?:\?|$)/i.test(request.url);
 }
 
+const geminiEffortRanks: Record<string, number> = {
+  none: 0,
+  minimal: 1,
+  low: 2,
+  medium: 3,
+  high: 4,
+  xhigh: 5,
+  max: 6,
+  ultra: 6
+};
+
+function readGeminiEffortRank(value: unknown): number | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return geminiEffortRanks[value.trim().toLowerCase()];
+}
+
+function requestedGeminiEffortRank(sourceBody: unknown): number | undefined {
+  if (!isRecord(sourceBody)) {
+    return undefined;
+  }
+  const reasoning = isRecord(sourceBody.reasoning) ? sourceBody.reasoning : undefined;
+  const outputConfig = isRecord(sourceBody.output_config) ? sourceBody.output_config : undefined;
+  return readGeminiEffortRank(reasoning?.effort) ??
+    readGeminiEffortRank(sourceBody.reasoning_effort) ??
+    readGeminiEffortRank(outputConfig?.effort);
+}
+
+function normalizedGeminiModelName(value: string | undefined): string | undefined {
+  return value?.trim().replace(/\[1m\]$/i, "").split("/").pop() || undefined;
+}
+
+function supportedGeminiEfforts(
+  targetProviderConfig: TargetProviderConfig | undefined,
+  model: string | undefined,
+  requestUrl: string
+): string[] {
+  const metadata = targetProviderConfig?.modelMetadata;
+  if (!metadata) {
+    return [];
+  }
+  const urlModel = /\/models\/([^/:]+):/i.exec(requestUrl)?.[1];
+  const candidates = [model, normalizedGeminiModelName(model), normalizedGeminiModelName(urlModel)].filter(
+    (value): value is string => Boolean(value)
+  );
+  const modelMetadata = candidates.map((candidate) => metadata[candidate]).find(Boolean);
+  if (!modelMetadata?.supportedReasoningLevels) {
+    return [];
+  }
+  return [...new Set(modelMetadata.supportedReasoningLevels
+    .map((level) => level.effort.trim().toLowerCase())
+    .filter((effort) => ["low", "medium", "high"].includes(effort)))];
+}
+
+function resolveGeminiThinkingLevel(
+  sourceBody: unknown,
+  targetProviderConfig: TargetProviderConfig | undefined,
+  model: string | undefined,
+  requestUrl: string
+): string | undefined {
+  const requestedRank = requestedGeminiEffortRank(sourceBody);
+  const supportedEfforts = supportedGeminiEfforts(targetProviderConfig, model, requestUrl);
+  if (requestedRank === undefined || supportedEfforts.length === 0) {
+    return undefined;
+  }
+  const selected = supportedEfforts.reduce((best, effort) => {
+    const distance = Math.abs(geminiEffortRanks[effort] - requestedRank);
+    const bestDistance = Math.abs(geminiEffortRanks[best] - requestedRank);
+    return distance < bestDistance ||
+      (distance === bestDistance && geminiEffortRanks[effort] < geminiEffortRanks[best])
+      ? effort
+      : best;
+  });
+  return selected.toUpperCase();
+}
+
 /**
  * Normalizes Gemini generateContent payloads before they cross the upstream boundary:
  * 1. Splits `user` turns that mix `functionResponse` and `text`/media parts into two
@@ -65,11 +150,14 @@ function isGeminiGenerateContentRequest(
  * 3. Removes `thinkingBudget` from `generationConfig.thinkingConfig` when `thinkingLevel`
  *    is present or when targeting Gemini 3/4 models (fixes HTTP 400 on Claude Code
  *    auto-mode classifier / sideQuery requests that send `thinking: { type: "disabled" }`).
- * 4. Strips malformed non-base64 `thoughtSignature` fields.
+ * 4. Maps and clamps client reasoning effort to `thinkingLevel` for models with declared
+ *    supported reasoning levels after provider defaults are merged.
+ * 5. Strips malformed non-base64 `thoughtSignature` fields.
  */
 export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
   request: T,
-  targetProviderConfig?: TargetProviderConfig
+  targetProviderConfig?: TargetProviderConfig,
+  options: GeminiRequestSanitizerOptions = {}
 ): T {
   if (!isGeminiGenerateContentRequest(request, targetProviderConfig) || !isRecord(request.body)) {
     return request;
@@ -129,8 +217,26 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
 
   let nextGenerationConfig = body.generationConfig;
   let generationConfigChanged = false;
-  if (isRecord(body.generationConfig) && isRecord(body.generationConfig.thinkingConfig)) {
-    const thinkingConfig = body.generationConfig.thinkingConfig;
+  const requestedThinkingLevel = resolveGeminiThinkingLevel(
+    options.sourceBody,
+    targetProviderConfig,
+    options.model,
+    request.url
+  );
+  if (requestedThinkingLevel) {
+    const generationConfig = isRecord(body.generationConfig) ? body.generationConfig : {};
+    const thinkingConfig = isRecord(generationConfig.thinkingConfig) ? generationConfig.thinkingConfig : {};
+    const currentThinkingLevel = thinkingConfig.thinkingLevel ?? thinkingConfig.thinking_level;
+    if (currentThinkingLevel !== requestedThinkingLevel || Object.hasOwn(thinkingConfig, "thinking_level")) {
+      const nextThinkingConfig: Record<string, unknown> = { ...thinkingConfig, thinkingLevel: requestedThinkingLevel };
+      delete nextThinkingConfig.thinking_level;
+      nextGenerationConfig = { ...generationConfig, thinkingConfig: nextThinkingConfig };
+      generationConfigChanged = true;
+    }
+  }
+
+  if (isRecord(nextGenerationConfig) && isRecord(nextGenerationConfig.thinkingConfig)) {
+    const thinkingConfig = nextGenerationConfig.thinkingConfig;
     const hasThinkingBudget =
       Object.hasOwn(thinkingConfig, "thinkingBudget") ||
       Object.hasOwn(thinkingConfig, "thinking_budget");
@@ -145,7 +251,7 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
       delete nextThinkingConfig.thinking_budget;
       generationConfigChanged = true;
       nextGenerationConfig = {
-        ...body.generationConfig,
+        ...nextGenerationConfig,
         ...(Object.keys(nextThinkingConfig).length > 0
           ? { thinkingConfig: nextThinkingConfig }
           : {})

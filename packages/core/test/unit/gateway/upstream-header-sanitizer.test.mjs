@@ -323,3 +323,61 @@ test("gemini sanitizer appends user continuation turn when contents ends on mode
   ]);
 });
 
+test("gemini sanitizer maps and clamps effort only for models with declared reasoning levels", () => {
+  const [hook] = createGatewayPlugin().providerHooks;
+  const targetProviderConfig = {
+    type: "gemini",
+    modelMetadata: {
+      "gemini-4-pro": {
+        supportedReasoningLevels: ["low", "medium", "high"].map((effort) => ({ effort }))
+      }
+    }
+  };
+  const transform = (sourceBody, providerConfig = targetProviderConfig) => hook.transformRequest({
+    model: "gemini-4-pro",
+    request: { body: sourceBody },
+    targetProviderConfig: providerConfig,
+    upstreamRequest: {
+      body: {
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        generationConfig: {
+          thinkingConfig: {
+            thinkingBudget: 1024,
+            thinkingLevel: "HIGH",
+            includeThoughts: true
+          }
+        }
+      },
+      headers: { "content-type": "application/json" },
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-pro:generateContent"
+    }
+  }).value;
+  const cases = [
+    [{ output_config: { effort: "low" } }, "LOW"],
+    [{ reasoning: { effort: "medium" } }, "MEDIUM"],
+    [{ reasoning_effort: "high" }, "HIGH"],
+    [{ output_config: { effort: "none" } }, "LOW"],
+    [{ output_config: { effort: "minimal" } }, "LOW"],
+    [{ output_config: { effort: "xhigh" } }, "HIGH"],
+    [{ output_config: { effort: "max" } }, "HIGH"],
+    [{ output_config: { effort: "ultra" } }, "HIGH"]
+  ];
+
+  for (const [sourceBody, thinkingLevel] of cases) {
+    const result = transform(sourceBody);
+    assert.deepEqual(result.body.generationConfig.thinkingConfig, {
+      thinkingLevel,
+      includeThoughts: true
+    });
+  }
+
+  assert.deepEqual(transform({}).body.generationConfig.thinkingConfig, {
+    thinkingLevel: "HIGH",
+    includeThoughts: true
+  });
+  assert.deepEqual(transform({ output_config: { effort: "low" } }, { type: "gemini" })
+    .body.generationConfig.thinkingConfig, {
+      thinkingLevel: "HIGH",
+      includeThoughts: true
+    });
+});
