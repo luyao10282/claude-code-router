@@ -1,4 +1,5 @@
 import { isRecord } from "@ccr/core/gateway/internal/value";
+import { createGeminiToolResultImageRestorer } from "@ccr/core/gateway/core-runtime/gemini-tool-result-images";
 
 type UpstreamRequest = {
   body?: unknown;
@@ -153,6 +154,7 @@ function resolveGeminiThinkingLevel(
  * 4. Maps and clamps client reasoning effort to `thinkingLevel` for models with declared
  *    supported reasoning levels after provider defaults are merged.
  * 5. Strips malformed non-base64 `thoughtSignature` fields.
+ * 6. Restores Anthropic tool-result images as native functionResponse media.
  */
 export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
   request: T,
@@ -165,6 +167,7 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
 
   const body = request.body;
   const rawContents = Array.isArray(body.contents) ? body.contents : [];
+  const restoreToolResultImages = createGeminiToolResultImageRestorer(options.sourceBody);
   let contentsChanged = false;
   const nextContents: unknown[] = [];
 
@@ -176,8 +179,9 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
 
     let partsChanged = false;
     const sanitizedParts = turn.parts.map((part) => {
-      const sanitized = sanitizePartThoughtSignature(part);
-      if (sanitized.changed) {
+      const restored = turn.role === "user" ? restoreToolResultImages(part) : part;
+      const sanitized = sanitizePartThoughtSignature(restored);
+      if (sanitized.changed || restored !== part) {
         partsChanged = true;
       }
       return sanitized.value;

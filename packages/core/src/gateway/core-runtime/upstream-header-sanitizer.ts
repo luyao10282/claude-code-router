@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { applyGeminiRequestSanitizer } from "@ccr/core/gateway/core-runtime/gemini-request-sanitizer";
+import { GeminiToolResultImageError } from "@ccr/core/gateway/core-runtime/gemini-tool-result-images";
 import { applyMetaTokenFloor } from "@ccr/core/gateway/core-runtime/meta-token-floor";
 import { applyResponsesSessionAffinity, inboundMetadataUserId, resolveResponsesSessionKey } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
 import type { ResponsesSessionAffinityInput } from "@ccr/core/gateway/core-runtime/responses-session-affinity";
@@ -332,14 +333,19 @@ export function createGatewayPlugin() {
             // Invalid URLs are reported by the upstream transport.
           }
         }
-        return {
-          ok: true as const,
-          value: applyGeminiRequestSanitizer(
-            applyMetaTokenFloor(upstreamRequest),
-            input.targetProviderConfig,
-            { model: input.model, sourceBody: input.request?.body }
-          )
-        };
+        try {
+          return {
+            ok: true as const,
+            value: applyGeminiRequestSanitizer(
+              applyMetaTokenFloor(upstreamRequest),
+              input.targetProviderConfig,
+              { model: input.model, sourceBody: input.request?.body }
+            )
+          };
+        } catch (error) {
+          if (error instanceof GeminiToolResultImageError) return { ok: false as const, error: error.message };
+          throw error;
+        }
       },
       transformResponse(input: ProviderPluginResponseInput) {
         const transformed = isOfficialOpenCodeGoChatRequest(
