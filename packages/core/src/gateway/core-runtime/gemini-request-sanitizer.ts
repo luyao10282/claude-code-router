@@ -155,6 +155,7 @@ function resolveGeminiThinkingLevel(
  *    supported reasoning levels after provider defaults are merged.
  * 5. Strips malformed non-base64 `thoughtSignature` fields.
  * 6. Restores Anthropic tool-result images as native functionResponse media.
+ * 7. Merges consecutive `functionResponse`-only `user` turns into a single `user` turn.
  */
 export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
   request: T,
@@ -169,10 +170,12 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
   const rawContents = Array.isArray(body.contents) ? body.contents : [];
   const restoreToolResultImages = createGeminiToolResultImageRestorer(options.sourceBody);
   let contentsChanged = false;
+  let previousTurnIsPureFunctionResponseUser = false;
   const nextContents: unknown[] = [];
 
   for (const turn of rawContents) {
     if (!isRecord(turn) || !Array.isArray(turn.parts)) {
+      previousTurnIsPureFunctionResponseUser = false;
       nextContents.push(turn);
       continue;
     }
@@ -192,14 +195,39 @@ export function applyGeminiRequestSanitizer<T extends UpstreamRequest>(
       const otherParts = sanitizedParts.filter((part) => !isFunctionResponsePart(part));
       if (fnParts.length > 0 && otherParts.length > 0) {
         contentsChanged = true;
+        previousTurnIsPureFunctionResponseUser = false;
         nextContents.push(
           { ...turn, role: "user", parts: fnParts },
           { ...turn, role: "user", parts: otherParts }
         );
         continue;
       }
+      if (fnParts.length > 0) {
+        const previousTurn = nextContents[nextContents.length - 1];
+        if (
+          previousTurnIsPureFunctionResponseUser &&
+          isRecord(previousTurn) &&
+          Array.isArray(previousTurn.parts)
+        ) {
+          contentsChanged = true;
+          nextContents[nextContents.length - 1] = {
+            ...previousTurn,
+            parts: [...previousTurn.parts, ...sanitizedParts]
+          };
+          continue;
+        }
+        previousTurnIsPureFunctionResponseUser = true;
+        if (partsChanged) {
+          contentsChanged = true;
+          nextContents.push({ ...turn, parts: sanitizedParts });
+        } else {
+          nextContents.push(turn);
+        }
+        continue;
+      }
     }
 
+    previousTurnIsPureFunctionResponseUser = false;
     if (partsChanged) {
       contentsChanged = true;
       nextContents.push({ ...turn, parts: sanitizedParts });

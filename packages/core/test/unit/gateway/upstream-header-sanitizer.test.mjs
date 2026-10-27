@@ -381,3 +381,110 @@ test("gemini sanitizer maps and clamps effort only for models with declared reas
       includeThoughts: true
     });
 });
+
+test("gemini sanitizer merges consecutive functionResponse-only user turns while preserving single tools, plain text, and mixed turns", () => {
+  const [hook] = createGatewayPlugin().providerHooks;
+  const run = (contents) => hook.transformRequest({
+    targetProviderConfig: { type: "gemini_generate_content" },
+    upstreamRequest: {
+      body: { contents },
+      headers: { "content-type": "application/json" },
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent"
+    }
+  }).value.body.contents;
+
+  const twoParallel = run([
+    { role: "user", parts: [{ text: "Read two files" }] },
+    {
+      role: "model",
+      parts: [
+        { functionCall: { id: "call_1", name: "Read", args: { path: "a.txt" } } },
+        { functionCall: { id: "call_2", name: "Read", args: { path: "b.txt" } } }
+      ]
+    },
+    { role: "user", parts: [{ functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } }] },
+    { role: "user", parts: [{ functionResponse: { id: "call_2", name: "Read", response: { content: "B", extra: 1 } } }] }
+  ]);
+  assert.deepEqual(twoParallel, [
+    { role: "user", parts: [{ text: "Read two files" }] },
+    {
+      role: "model",
+      parts: [
+        { functionCall: { id: "call_1", name: "Read", args: { path: "a.txt" } } },
+        { functionCall: { id: "call_2", name: "Read", args: { path: "b.txt" } } }
+      ]
+    },
+    {
+      role: "user",
+      parts: [
+        { functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } },
+        { functionResponse: { id: "call_2", name: "Read", response: { content: "B", extra: 1 } } }
+      ]
+    }
+  ]);
+
+  const threeParallel = run([
+    { role: "user", parts: [{ text: "Read three files" }] },
+    {
+      role: "model",
+      parts: [
+        { functionCall: { id: "call_1", name: "Read", args: { path: "a.txt" } } },
+        { functionCall: { id: "call_2", name: "Read", args: { path: "b.txt" } } },
+        { functionCall: { id: "call_3", name: "Read", args: { path: "c.txt" } } }
+      ]
+    },
+    { role: "user", parts: [{ functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } }] },
+    { role: "user", parts: [{ function_response: { id: "call_2", name: "Read", response: { content: "B" } } }] },
+    { role: "user", parts: [{ functionResponse: { id: "call_3", name: "Read", response: { content: "C" } } }] }
+  ]);
+  assert.deepEqual(threeParallel, [
+    { role: "user", parts: [{ text: "Read three files" }] },
+    {
+      role: "model",
+      parts: [
+        { functionCall: { id: "call_1", name: "Read", args: { path: "a.txt" } } },
+        { functionCall: { id: "call_2", name: "Read", args: { path: "b.txt" } } },
+        { functionCall: { id: "call_3", name: "Read", args: { path: "c.txt" } } }
+      ]
+    },
+    {
+      role: "user",
+      parts: [
+        { functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } },
+        { function_response: { id: "call_2", name: "Read", response: { content: "B" } } },
+        { functionResponse: { id: "call_3", name: "Read", response: { content: "C" } } }
+      ]
+    }
+  ]);
+
+  const adjacentText = [
+    { role: "user", parts: [{ text: "First user note" }] },
+    { role: "user", parts: [{ text: "Second user note" }] }
+  ];
+  assert.deepEqual(run(adjacentText), adjacentText);
+
+  const mixedTurns = run([
+    { role: "user", parts: [{ functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } }] },
+    {
+      role: "user",
+      parts: [
+        { functionResponse: { id: "call_2", name: "Read", response: { content: "B" } } },
+        { text: "Trailing text" }
+      ]
+    },
+    { role: "user", parts: [{ functionResponse: { id: "call_3", name: "Read", response: { content: "C" } } }] }
+  ]);
+  assert.deepEqual(mixedTurns, [
+    { role: "user", parts: [{ functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } }] },
+    { role: "user", parts: [{ functionResponse: { id: "call_2", name: "Read", response: { content: "B" } } }] },
+    { role: "user", parts: [{ text: "Trailing text" }] },
+    { role: "user", parts: [{ functionResponse: { id: "call_3", name: "Read", response: { content: "C" } } }] }
+  ]);
+
+  const singleTool = [
+    { role: "user", parts: [{ text: "Read one file" }] },
+    { role: "model", parts: [{ functionCall: { id: "call_1", name: "Read", args: { path: "a.txt" } } }] },
+    { role: "user", parts: [{ functionResponse: { id: "call_1", name: "Read", response: { content: "A" } } }] }
+  ];
+  assert.deepEqual(run(singleTool), singleTool);
+});
